@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createMockRuntime, createMockSession, mockModels, mockProviders } from '../core/AgentRuntime';
-import type { AgentEvent, Provider, Session, SessionTab } from '../core/types';
+import { providerManager } from '../core/ProviderManager';
+import { sessionManager } from '../core/SessionManager';
+import type { Provider, Session, SessionTab } from '../core/types';
 
 const runtime = createMockRuntime();
 
@@ -48,6 +50,7 @@ export default function App() {
   );
 
   const currentMessages = messages[selectedSessionId] ?? [];
+  const availableModels = providerManager.listModels(selectedProviderId);
 
   useEffect(() => {
     const loadUsage = async () => {
@@ -58,14 +61,48 @@ export default function App() {
     void loadUsage();
   }, [selectedSessionId]);
 
+  useEffect(() => {
+    if (!availableModels.some((model) => model.id === selectedModelId)) {
+      setSelectedModelId(availableModels[0]?.id ?? mockModels[0].id);
+    }
+  }, [availableModels, selectedModelId]);
+
   const handleAddSession = () => {
-    const newSession = createMockSession(`New Session ${sessions.length + 1}`);
+    const newSession = sessionManager.create(`New Session ${sessions.length + 1}`);
     setSessions((prev) => [newSession, ...prev]);
     setSelectedSessionId(newSession.id);
     setMessages((prev) => ({
       ...prev,
       [newSession.id]: [{ id: `m-${newSession.id}`, role: 'assistant', text: '新会话已创建，可以开始执行任务。' }],
     }));
+  };
+
+  const handleRenameSession = () => {
+    const nextTitle = window.prompt('重命名会话', selectedSession.title);
+    if (!nextTitle || !nextTitle.trim()) return;
+
+    const updated = sessionManager.updateTitle(selectedSessionId, nextTitle.trim());
+    if (!updated) return;
+
+    setSessions((prev) => prev.map((session) => (session.id === selectedSessionId ? { ...session, title: updated.title, updatedAt: updated.updatedAt } : session)));
+  };
+
+  const handleDeleteSession = () => {
+    if (!window.confirm('确认删除当前会话？')) return;
+
+    const removed = sessionManager.remove(selectedSessionId);
+    if (!removed) return;
+
+    setSessions((prev) => prev.filter((session) => session.id !== selectedSessionId));
+    if (sessions.length > 1) {
+      const next = prevAfterDelete();
+      if (next) setSelectedSessionId(next.id);
+    }
+  };
+
+  const prevAfterDelete = () => {
+    const remaining = sessions.filter((session) => session.id !== selectedSessionId);
+    return remaining[0] ?? null;
   };
 
   const handleSend = async () => {
@@ -132,6 +169,8 @@ export default function App() {
 
         <div className="topbar-center">
           <button className="toolbar-button" onClick={handleAddSession}>新建会话</button>
+          <button className="toolbar-button" onClick={handleRenameSession}>重命名</button>
+          <button className="toolbar-button" onClick={handleDeleteSession}>删除</button>
           <button className="toolbar-button" disabled={isRunning}>{isRunning ? '处理中…' : '继续执行'}</button>
           <button className="toolbar-button">停止</button>
         </div>
@@ -151,7 +190,7 @@ export default function App() {
           <label className="select-wrap">
             <span>Model</span>
             <select value={selectedModelId} onChange={(event) => setSelectedModelId(event.target.value)}>
-              {mockModels.map((model) => (
+              {availableModels.map((model) => (
                 <option key={model.id} value={model.id}>
                   {model.name}
                 </option>
@@ -281,7 +320,7 @@ export default function App() {
         <span>Token: {(contextUsage.total / 1000).toFixed(1)}K / {(contextUsage.limit / 1000).toFixed(0)}K</span>
         <span>Context: {Math.round((contextUsage.total / contextUsage.limit) * 100)}%</span>
         <span>Provider: {providerOptions.find((provider) => provider.id === selectedProviderId)?.name ?? 'OpenAI Compatible'}</span>
-        <span>Model: {mockModels.find((model) => model.id === selectedModelId)?.name ?? 'GPT-4.1'}</span>
+        <span>Model: {availableModels.find((model) => model.id === selectedModelId)?.name ?? 'GPT-4.1'}</span>
       </footer>
     </div>
   );
