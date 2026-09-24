@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "electron/main.js",
@@ -12,6 +12,8 @@
     "preview": "vite preview --host 0.0.0.0 --port 4173"
   },
   "dependencies": {
+    "@deepseek-ai/dsh-sdk-client": "0.1.7-rc.2",
+    "@deepseek-ai/dsh": "0.1.7-rc.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

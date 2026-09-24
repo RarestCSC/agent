@@ -1,10 +1,86 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('node:path');
 
 const isDev = !app.isPackaged;
+let mainWindow;
+let harness;
+const sessions = new Map();
+
+async function loadDshSdk() {
+  // Keep the SDK in the Electron main process. The renderer must never spawn
+  // a runtime or receive API keys.
+  return import('@deepseek-ai/dsh-sdk-client');
+}
+
+function sendRuntimeEvent(event) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('dsh:event', event);
+}
+
+function mapNotification(notification) {
+  const params = notification?.params || {};
+  const event = params.event || {};
+  const type = event.type || notification.method;
+  const data = event.data || {};
+  const message = data.message || {};
+
+  if (type === 'assistant/message') {
+    const text = Array.isArray(message.content)
+      ? message.content.filter((block) => block?.type === 'text').map((block) => block.text).join('')
+      : '';
+    return { type: 'assistant', message: text, raw: notification };
+  }
+  if (type === 'turn/end') return { type: 'agent.completed', message: '', raw: notification };
+  if (type === 'tool/call' || type === 'tool/result') {
+    return { type: 'tool', message: JSON.stringify(data), raw: notification };
+  }
+  if (notification.method === 'session.status') {
+    return { type: params.status === 'idle' ? 'agent.completed' : 'agent.started', message: String(params.status || ''), raw: notification };
+  }
+  return { type: 'runtime', message: JSON.stringify(event || params), raw: notification };
+}
+
+ipcMain.handle('dsh:start', async (_event, options = {}) => {
+  if (!harness) {
+    const { DeepSeekHarness } = await loadDshSdk();
+    const dshOptions = {
+      profile: options.profile || 'sdk',
+      dshBin: options.dshBin || process.env.DSH_BIN,
+      cwd: options.cwd || process.cwd(),
+      processCwd: options.cwd || process.cwd(),
+      provider: options.provider || 'deepseek-official',
+      model: options.model || 'deepseek-v4-flash',
+      maxTokens: options.maxTokens,
+      requestTimeoutMs: options.requestTimeoutMs,
+    };
+    Object.keys(dshOptions).forEach((key) => dshOptions[key] === undefined && delete dshOptions[key]);
+    harness = new DeepSeekHarness(dshOptions);
+    await harness.start();
+  }
+  const session = harness.session(options.sessionId);
+  sessions.set(session.id, session);
+  return { sessionId: session.id, runtime: 'dsh', profile: options.profile || 'sdk' };
+});
+
+ipcMain.handle('dsh:send', async (_event, { sessionId, prompt }) => {
+  if (!harness) throw new Error('DSH runtime is not started');
+  const session = sessions.get(sessionId) || harness.session(sessionId);
+  sessions.set(sessionId, session);
+  const result = await session.run(prompt, {
+    onNotification: (notification) => sendRuntimeEvent(mapNotification(notification)),
+  });
+  return { sessionId: result.sessionId, finalResponse: result.finalResponse };
+});
+
+ipcMain.handle('dsh:stop', async () => {
+  if (!harness) return;
+  await harness.close();
+  harness = undefined;
+  sessions.clear();
+});
 
 function createWindow() {
-  const win = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1440,
     height: 980,
     minWidth: 1200,
@@ -17,24 +93,26 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-
-  if (isDev) {
-    win.loadURL('http://127.0.0.1:5173');
-  } else {
-    win.loadFile(path.join(__dirname, '../dist/index.html'));
-  }
+  if (isDev) mainWindow.loadURL('http://127.0.0.1:5173');
+  else mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
 }
 
 app.whenReady().then(() => {
   createWindow();
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
+app.on('before-quit', async () => {
+  if (harness) {
+    try { await harness.close(); } catch { /* runtime shutdown must not block app exit */ }
+    harness = undefined;
   }
 });
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+
+void shell;
