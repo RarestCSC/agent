@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createMockRuntime, createMockSession, mockModels, mockProviders } from '../core/AgentRuntime';
-import { providerManager } from '../core/ProviderManager';
-import { sessionManager } from '../core/SessionManager';
-import type { Provider, Session, SessionTab } from '../core/types';
+import type { Checkpoint, ChatMessage, MessageRole, PermissionRequest, Provider, Session, SessionTab } from '../core/types';
 
 const runtime = createMockRuntime();
 
@@ -15,7 +13,7 @@ const defaultSessions: Session[] = [
   createMockSession('生成文档说明'),
 ];
 
-const defaultMessages: Record<string, Array<{ id: string; role: 'user' | 'assistant' | 'tool' | 'system'; text: string }>> = {
+const defaultMessages: Record<string, ChatMessage[]> = {
   [initialSession.id]: [
     { id: 'm1', role: 'user', text: '请帮我检查这个项目的配置，并说明最适合的工作流。' },
     { id: 'm2', role: 'assistant', text: '我先分析项目结构，检查依赖、运行脚本和桌面启动入口，然后给出最稳定的实现方案。' },
@@ -24,17 +22,26 @@ const defaultMessages: Record<string, Array<{ id: string; role: 'user' | 'assist
   ],
 };
 
-const providerOptions: Provider[] = mockProviders;
+const defaultCheckpoints: Checkpoint[] = [
+  {
+    id: 'checkpoint-1',
+    sessionId: initialSession.id,
+    title: 'Initial Checkpoint',
+    createdAt: new Date().toISOString(),
+    summary: '项目骨架已初始化，UI 运行正常。',
+  },
+];
 
 export default function App() {
   const [sessions, setSessions] = useState<Session[]>(defaultSessions);
   const [selectedSessionId, setSelectedSessionId] = useState<string>(initialSession.id);
-  const [selectedProviderId, setSelectedProviderId] = useState<string>(providerOptions[0].id);
+  const [providerOptions, setProviderOptions] = useState<Provider[]>(mockProviders);
+  const [selectedProviderId, setSelectedProviderId] = useState<string>(mockProviders[0].id);
   const [selectedModelId, setSelectedModelId] = useState<string>(mockModels[0].id);
   const [activeTab, setActiveTab] = useState<SessionTab>('Files');
   const [input, setInput] = useState('检查项目并给出初始化方案');
   const [isRunning, setIsRunning] = useState(false);
-  const [messages, setMessages] = useState<Record<string, Array<{ id: string; role: 'user' | 'assistant' | 'tool' | 'system'; text: string }>>>(defaultMessages);
+  const [messages, setMessages] = useState<Record<string, ChatMessage[]>>(defaultMessages);
   const [contextUsage, setContextUsage] = useState({
     system: 2100,
     tools: 3400,
@@ -43,6 +50,15 @@ export default function App() {
     total: 20500,
     limit: 128000,
   });
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>(defaultCheckpoints);
+  const [permissionRequest, setPermissionRequest] = useState<PermissionRequest | null>(null);
+  const [showProviderEditor, setShowProviderEditor] = useState(false);
+  const [providerForm, setProviderForm] = useState({
+    name: 'VortexAI',
+    protocol: 'openai-compatible' as Provider['protocol'],
+    baseUrl: 'https://gateway.example.com/v1',
+    apiKey: 'demo-key',
+  });
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? sessions[0],
@@ -50,7 +66,17 @@ export default function App() {
   );
 
   const currentMessages = messages[selectedSessionId] ?? [];
-  const availableModels = providerManager.listModels(selectedProviderId);
+
+  const availableModels = useMemo(
+    () => mockModels.filter((model) => model.providerId === selectedProviderId),
+    [selectedProviderId],
+  );
+
+  useEffect(() => {
+    if (!availableModels.some((model) => model.id === selectedModelId)) {
+      setSelectedModelId(availableModels[0]?.id ?? mockModels[0].id);
+    }
+  }, [availableModels, selectedModelId]);
 
   useEffect(() => {
     const loadUsage = async () => {
@@ -61,56 +87,145 @@ export default function App() {
     void loadUsage();
   }, [selectedSessionId]);
 
-  useEffect(() => {
-    if (!availableModels.some((model) => model.id === selectedModelId)) {
-      setSelectedModelId(availableModels[0]?.id ?? mockModels[0].id);
-    }
-  }, [availableModels, selectedModelId]);
+  const getNextSessionAfterDelete = (sessionId: string) => {
+    const remaining = sessions.filter((session) => session.id !== sessionId);
+    return remaining[0] ?? null;
+  };
 
   const handleAddSession = () => {
-    const newSession = sessionManager.create(`New Session ${sessions.length + 1}`);
+    const newSession = createMockSession(`New Session ${sessions.length + 1}`);
     setSessions((prev) => [newSession, ...prev]);
     setSelectedSessionId(newSession.id);
     setMessages((prev) => ({
       ...prev,
       [newSession.id]: [{ id: `m-${newSession.id}`, role: 'assistant', text: '新会话已创建，可以开始执行任务。' }],
     }));
+
+    setCheckpoints((prev) => [
+      {
+        id: `checkpoint-${Date.now()}`,
+        sessionId: newSession.id,
+        title: 'Initial state',
+        createdAt: new Date().toISOString(),
+        summary: '会话已初始化。',
+      },
+      ...prev,
+    ]);
   };
 
   const handleRenameSession = () => {
     const nextTitle = window.prompt('重命名会话', selectedSession.title);
     if (!nextTitle || !nextTitle.trim()) return;
 
-    const updated = sessionManager.updateTitle(selectedSessionId, nextTitle.trim());
-    if (!updated) return;
-
-    setSessions((prev) => prev.map((session) => (session.id === selectedSessionId ? { ...session, title: updated.title, updatedAt: updated.updatedAt } : session)));
+    setSessions((prev) =>
+      prev.map((session) =>
+        session.id === selectedSessionId
+          ? {
+              ...session,
+              title: nextTitle.trim(),
+              updatedAt: new Date().toISOString(),
+            }
+          : session,
+      ),
+    );
   };
 
   const handleDeleteSession = () => {
     if (!window.confirm('确认删除当前会话？')) return;
 
-    const removed = sessionManager.remove(selectedSessionId);
-    if (!removed) return;
-
+    const next = getNextSessionAfterDelete(selectedSessionId);
     setSessions((prev) => prev.filter((session) => session.id !== selectedSessionId));
-    if (sessions.length > 1) {
-      const next = prevAfterDelete();
-      if (next) setSelectedSessionId(next.id);
+    setMessages((prev) => {
+      const nextMap = { ...prev };
+      delete nextMap[selectedSessionId];
+      return nextMap;
+    });
+
+    if (next) {
+      setSelectedSessionId(next.id);
     }
   };
 
-  const prevAfterDelete = () => {
-    const remaining = sessions.filter((session) => session.id !== selectedSessionId);
-    return remaining[0] ?? null;
+  const handleCreateCheckpoint = () => {
+    const checkpoint: Checkpoint = {
+      id: `checkpoint-${Date.now()}`,
+      sessionId: selectedSessionId,
+      title: `Checkpoint ${checkpoints.length + 1}`,
+      createdAt: new Date().toISOString(),
+      summary: '自动保存当前会话状态。',
+    };
+
+    setCheckpoints((prev) => [checkpoint, ...prev]);
+    setMessages((prev) => ({
+      ...prev,
+      [selectedSessionId]: [
+        ...(prev[selectedSessionId] ?? []),
+        {
+          id: `checkpoint-${Date.now()}`,
+          role: 'system',
+          text: `已创建检查点：${checkpoint.title}`,
+        },
+      ],
+    }));
+  };
+
+  const handleResumeCheckpoint = (checkpoint: Checkpoint) => {
+    setMessages((prev) => ({
+      ...prev,
+      [selectedSessionId]: [
+        ...(prev[selectedSessionId] ?? []),
+        {
+          id: `resume-${Date.now()}`,
+          role: 'assistant',
+          text: `已从检查点恢复：${checkpoint.title}，状态已恢复到该节点。`,
+        },
+      ],
+    }));
+  };
+
+  const handlePermissionReply = (approved: boolean) => {
+    if (!permissionRequest) return;
+
+    if (approved) {
+      setMessages((prev) => ({
+        ...prev,
+        [selectedSessionId]: [
+          ...(prev[selectedSessionId] ?? []),
+          {
+            id: `permission-${Date.now()}`,
+            role: 'system',
+            text: `已授权：${permissionRequest.description}`,
+          },
+        ],
+      }));
+    }
+
+    setPermissionRequest(null);
   };
 
   const handleSend = async () => {
     const prompt = input.trim();
     if (!prompt || isRunning) return;
 
+    const dangerous = /rm\s+-rf|delete.*(file|folder)|drop\s+table|git reset --hard/i.test(prompt);
+
+    if (dangerous) {
+      setPermissionRequest({
+        id: `permission-${Date.now()}`,
+        action: 'shell',
+        description: 'Agent 想执行危险命令：' + prompt,
+        allowOnce: true,
+        allowSession: true,
+      });
+      return;
+    }
+
     const sessionId = selectedSession.id;
-    const userMessage = { id: `msg-user-${Date.now()}`, role: 'user' as const, text: prompt };
+    const userMessage: ChatMessage = {
+      id: `msg-user-${Date.now()}`,
+      role: 'user',
+      text: prompt,
+    };
 
     setMessages((prev) => ({
       ...prev,
@@ -119,7 +234,7 @@ export default function App() {
     setInput('');
     setIsRunning(true);
 
-    const placeholder: { id: string; role: 'assistant'; text: string } = {
+    const placeholder: ChatMessage = {
       id: `msg-assistant-${Date.now()}`,
       role: 'assistant',
       text: '',
@@ -133,8 +248,8 @@ export default function App() {
     try {
       for await (const event of runtime.sendMessage(sessionId, prompt)) {
         setMessages((prev) => {
-          const previous = prev[sessionId] ?? [];
-          const next = [...previous];
+          const existing = prev[sessionId] ?? [];
+          const next = [...existing];
           const last = next[next.length - 1];
 
           if (last && last.role === 'assistant' && last.text === '') {
@@ -159,6 +274,28 @@ export default function App() {
     }
   };
 
+  const handleAddProvider = () => {
+    const proto = providerForm.protocol;
+    const newProvider: Provider = {
+      id: `provider-${Date.now()}`,
+      name: providerForm.name,
+      protocol: proto,
+      baseUrl: providerForm.baseUrl,
+      enabled: true,
+      apiKeySet: Boolean(providerForm.apiKey),
+    };
+
+    setProviderOptions((prev) => [...prev, newProvider]);
+    setSelectedProviderId(newProvider.id);
+    setShowProviderEditor(false);
+    setProviderForm({
+      name: 'VortexAI',
+      protocol: 'openai-compatible',
+      baseUrl: 'https://gateway.example.com/v1',
+      apiKey: 'demo-key',
+    });
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -171,11 +308,14 @@ export default function App() {
           <button className="toolbar-button" onClick={handleAddSession}>新建会话</button>
           <button className="toolbar-button" onClick={handleRenameSession}>重命名</button>
           <button className="toolbar-button" onClick={handleDeleteSession}>删除</button>
+          <button className="toolbar-button" onClick={handleCreateCheckpoint}>Checkpoint</button>
+          <button className="toolbar-button">Resume</button>
           <button className="toolbar-button" disabled={isRunning}>{isRunning ? '处理中…' : '继续执行'}</button>
           <button className="toolbar-button">停止</button>
         </div>
 
         <div className="topbar-right">
+          <button className="toolbar-button" onClick={() => setShowProviderEditor(true)}>Providers</button>
           <label className="select-wrap">
             <span>Provider</span>
             <select value={selectedProviderId} onChange={(event) => setSelectedProviderId(event.target.value)}>
@@ -230,7 +370,7 @@ export default function App() {
           </div>
 
           <div className="sidebar-footer">
-            <button>Providers</button>
+            <button onClick={() => setShowProviderEditor(true)}>Providers</button>
             <button>Settings</button>
           </div>
         </aside>
@@ -238,12 +378,12 @@ export default function App() {
         <main className="chat-panel">
           <div className="chat-header">
             <div>
-              <div className="chat-title">{selectedSession.title}</div>
+              <div className="chat-title">{selectedSession?.title ?? 'Session'}</div>
               <div className="chat-subtitle">单 Agent · DSH Runtime</div>
             </div>
             <div className="chat-actions">
-              <button>Checkpoint</button>
-              <button>Resume</button>
+              <button onClick={handleCreateCheckpoint}>Checkpoint</button>
+              <button onClick={() => handleResumeCheckpoint(checkpoints[0])}>Resume</button>
             </div>
           </div>
 
@@ -298,7 +438,20 @@ export default function App() {
             )}
 
             {activeTab === 'Diff' && (
-              <pre>{`+ DSH Desktop Agent\n+ Session Manager\n+ Provider / Model UI\n+ Context Manager\n+ DSH Adapter`}</pre>
+              <div className="diff-box">
+                <div>{`+ DSH Desktop Agent`}</div>
+                <div>{`+ Session Manager`}</div>
+                <div>{`+ Provider / Model UI`}</div>
+                <div>{`+ Context Manager`}</div>
+                <div>{`+ DSH Adapter`}</div>
+                <div className="checkpoint-list">
+                  {checkpoints.map((checkpoint) => (
+                    <button key={checkpoint.id} className="checkpoint-item" onClick={() => handleResumeCheckpoint(checkpoint)}>
+                      {checkpoint.title}
+                    </button>
+                  ))}
+                </div>
+              </div>
             )}
 
             {activeTab === 'Preview' && (
@@ -322,6 +475,66 @@ export default function App() {
         <span>Provider: {providerOptions.find((provider) => provider.id === selectedProviderId)?.name ?? 'OpenAI Compatible'}</span>
         <span>Model: {availableModels.find((model) => model.id === selectedModelId)?.name ?? 'GPT-4.1'}</span>
       </footer>
+
+      {showProviderEditor && (
+        <div className="modal-overlay">
+          <div className="modal-card">
+            <div className="modal-header">
+              <strong>Add Provider</strong>
+              <button onClick={() => setShowProviderEditor(false)}>×</button>
+            </div>
+
+            <div className="provider-form">
+              <label>
+                <span>Name</span>
+                <input value={providerForm.name} onChange={(event) => setProviderForm((prev) => ({ ...prev, name: event.target.value }))} />
+              </label>
+
+              <label>
+                <span>Protocol</span>
+                <select value={providerForm.protocol} onChange={(event) => setProviderForm((prev) => ({ ...prev, protocol: event.target.value as Provider['protocol'] }))}>
+                  <option value="openai">OpenAI</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="openai-compatible">OpenAI Compatible</option>
+                </select>
+              </label>
+
+              <label>
+                <span>Base URL</span>
+                <input value={providerForm.baseUrl} onChange={(event) => setProviderForm((prev) => ({ ...prev, baseUrl: event.target.value }))} />
+              </label>
+
+              <label>
+                <span>API Key</span>
+                <input value={providerForm.apiKey} onChange={(event) => setProviderForm((prev) => ({ ...prev, apiKey: event.target.value }))} />
+              </label>
+            </div>
+
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => setShowProviderEditor(false)}>Cancel</button>
+              <button className="primary" onClick={handleAddProvider}>Save Provider</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {permissionRequest && (
+        <div className="modal-overlay">
+          <div className="modal-card narrow">
+            <div className="modal-header">
+              <strong>Permission Required</strong>
+            </div>
+
+            <p>{permissionRequest.description}</p>
+
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => handlePermissionReply(false)}>Deny</button>
+              <button className="secondary" onClick={() => handlePermissionReply(true)}>Allow Once</button>
+              <button className="primary" onClick={() => handlePermissionReply(true)}>Allow Session</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
