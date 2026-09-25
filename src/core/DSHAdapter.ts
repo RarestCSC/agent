@@ -1,5 +1,5 @@
 import type { AgentEvent, ContextUsage, Session } from './types';
-import type { AgentRuntime, DshStartOptions } from './DSHDesktopAPI';
+import type { AgentRuntime, DshRuntimeEvent, DshStartOptions } from './DSHDesktopAPI';
 
 export class DSHAdapter implements AgentRuntime {
   private started = new Set<string>();
@@ -9,44 +9,61 @@ export class DSHAdapter implements AgentRuntime {
 
   constructor() {
     this.unsubscribe = window.dshDesktopAPI?.dsh.onEvent((event) => {
+      const sessionId = event.sessionId;
+      if (!sessionId) return;
+
       const normalized: AgentEvent = {
-        type: event.type === 'tool' ? 'tool' : event.type === 'agent.completed' ? 'checkpoint' : 'assistant',
+        type: event.type === 'tool' ? 'tool' : event.type === 'checkpoint' ? 'checkpoint' : 'assistant',
         message: event.message,
         createdAt: new Date().toISOString(),
       };
-      this.push(event.raw && typeof event.raw === 'object' ? String(event.message) : normalized.message, normalized);
+      this.push(sessionId, normalized);
     });
   }
 
   async startSession(title: string): Promise<Session> {
-    const options: DshStartOptions = { provider: 'deepseek-official', model: 'deepseek-v4-flash' };
-    const result = await window.dshDesktopAPI?.dsh.start(options);
-    const id = result?.sessionId || `dsh-${Date.now()}`;
+    const sessionId = `session-${Date.now()}`;
+    const result = await window.dshDesktopAPI?.dsh.start({
+      sessionId,
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+    });
+
+    const id = result?.sessionId || sessionId;
     this.started.add(id);
+
     return {
       id,
       title,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      providerId: options.provider!,
-      modelId: options.model!,
+      providerId: 'deepseek-official',
+      modelId: 'deepseek-v4-flash',
     };
   }
 
   async *sendMessage(sessionId: string, prompt: string): AsyncIterable<AgentEvent> {
-    if (!this.started.has(sessionId)) await this.startSession(sessionId);
-    const sendPromise = window.dshDesktopAPI?.dsh.send(sessionId, prompt);
-    if (!sendPromise) throw new Error('DSH Desktop API is unavailable');
-    void sendPromise.catch((error) => this.push(sessionId, {
-      type: 'error', message: error instanceof Error ? error.message : String(error), createdAt: new Date().toISOString(),
-    }));
-
-    while (true) {
-      const event = await this.next(sessionId);
-      if (!event) break;
-      yield event;
-      if (event.type === 'checkpoint') break;
+    if (!this.started.has(sessionId)) {
+      await this.startSession(sessionId);
     }
+
+    const response = await window.dshDesktopAPI?.dsh.send(sessionId, prompt);
+    if (!response) throw new Error('DSH Desktop API is unavailable');
+
+    const assistantEvent: AgentEvent = {
+      type: 'assistant',
+      message: response.finalResponse || 'Request completed.',
+      createdAt: new Date().toISOString(),
+    };
+
+    const checkpointEvent: AgentEvent = {
+      type: 'checkpoint',
+      message: 'DSH session completed.',
+      createdAt: new Date().toISOString(),
+    };
+
+    yield assistantEvent;
+    yield checkpointEvent;
   }
 
   async cancel(_sessionId: string): Promise<void> {
@@ -57,13 +74,18 @@ export class DSHAdapter implements AgentRuntime {
     return { system: 2000, tools: 3000, conversation: 0, files: 0, total: 5000, limit: 128000 };
   }
 
-  dispose(): void { this.unsubscribe?.(); }
+  dispose(): void {
+    this.unsubscribe?.();
+  }
 
   private push(sessionId: string, event: AgentEvent): void {
     const waiters = this.waiters.get(sessionId);
     const waiter = waiters?.shift();
-    if (waiter) waiter(event);
-    else this.queues.set(sessionId, [...(this.queues.get(sessionId) || []), event]);
+    if (waiter) {
+      waiter(event);
+      return;
+    }
+    this.queues.set(sessionId, [...(this.queues.get(sessionId) || []), event]);
   }
 
   private next(sessionId: string): Promise<AgentEvent | undefined> {

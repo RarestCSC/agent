@@ -7,17 +7,15 @@ let harness;
 const sessions = new Map();
 
 async function loadDshSdk() {
-  // Keep the SDK in the Electron main process. The renderer must never spawn
-  // a runtime or receive API keys.
   return import('@deepseek-ai/dsh-sdk-client');
 }
 
-function sendRuntimeEvent(event) {
+function sendRuntimeEvent(sessionId, event) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.webContents.send('dsh:event', event);
+  mainWindow.webContents.send('dsh:event', { sessionId, ...event });
 }
 
-function mapNotification(notification) {
+function mapNotification(sessionId, notification) {
   const params = notification?.params || {};
   const event = params.event || {};
   const type = event.type || notification.method;
@@ -28,16 +26,23 @@ function mapNotification(notification) {
     const text = Array.isArray(message.content)
       ? message.content.filter((block) => block?.type === 'text').map((block) => block.text).join('')
       : '';
-    return { type: 'assistant', message: text, raw: notification };
+    return { type: 'assistant', message: text, raw: notification, sessionId };
   }
-  if (type === 'turn/end') return { type: 'agent.completed', message: '', raw: notification };
+  if (type === 'turn/end') {
+    return { type: 'checkpoint', message: '', raw: notification, sessionId };
+  }
   if (type === 'tool/call' || type === 'tool/result') {
-    return { type: 'tool', message: JSON.stringify(data), raw: notification };
+    return { type: 'tool', message: JSON.stringify(data), raw: notification, sessionId };
   }
   if (notification.method === 'session.status') {
-    return { type: params.status === 'idle' ? 'agent.completed' : 'agent.started', message: String(params.status || ''), raw: notification };
+    return {
+      type: params.status === 'idle' ? 'checkpoint' : 'assistant',
+      message: String(params.status || ''),
+      raw: notification,
+      sessionId,
+    };
   }
-  return { type: 'runtime', message: JSON.stringify(event || params), raw: notification };
+  return { type: 'runtime', message: JSON.stringify(event || params), raw: notification, sessionId };
 }
 
 ipcMain.handle('dsh:start', async (_event, options = {}) => {
@@ -57,18 +62,25 @@ ipcMain.handle('dsh:start', async (_event, options = {}) => {
     harness = new DeepSeekHarness(dshOptions);
     await harness.start();
   }
-  const session = harness.session(options.sessionId);
-  sessions.set(session.id, session);
-  return { sessionId: session.id, runtime: 'dsh', profile: options.profile || 'sdk' };
+
+  const sessionId = options.sessionId || `session-${Date.now()}`;
+  const session = harness.session(sessionId);
+  sessions.set(sessionId, session);
+  return { sessionId, runtime: 'dsh', profile: options.profile || 'sdk' };
 });
 
 ipcMain.handle('dsh:send', async (_event, { sessionId, prompt }) => {
   if (!harness) throw new Error('DSH runtime is not started');
   const session = sessions.get(sessionId) || harness.session(sessionId);
   sessions.set(sessionId, session);
+
   const result = await session.run(prompt, {
-    onNotification: (notification) => sendRuntimeEvent(mapNotification(notification)),
+    onNotification: (notification) => {
+      const event = mapNotification(sessionId, notification);
+      sendRuntimeEvent(sessionId, event);
+    },
   });
+
   return { sessionId: result.sessionId, finalResponse: result.finalResponse };
 });
 
@@ -93,12 +105,14 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
   if (isDev) mainWindow.loadURL('http://127.0.0.1:5173');
   else mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
 }
 
 app.whenReady().then(() => {
   createWindow();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

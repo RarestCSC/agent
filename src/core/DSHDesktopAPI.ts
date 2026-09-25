@@ -10,6 +10,13 @@ export interface DshStartOptions {
   requestTimeoutMs?: number;
 }
 
+export interface DshRuntimeEvent {
+  sessionId: string;
+  type: 'assistant' | 'thinking' | 'tool' | 'runtime' | 'checkpoint' | 'error';
+  message: string;
+  raw?: unknown;
+}
+
 export interface DshDesktopAPI {
   version: string;
   platform: string;
@@ -17,7 +24,7 @@ export interface DshDesktopAPI {
     start(options?: DshStartOptions): Promise<{ sessionId: string; runtime: string; profile: string }>;
     send(sessionId: string, prompt: string): Promise<{ sessionId: string; finalResponse: string }>;
     stop(): Promise<void>;
-    onEvent(listener: (event: AgentEvent & { raw?: unknown }) => void): () => void;
+    onEvent(listener: (event: DshRuntimeEvent) => void): () => void;
   };
 }
 
