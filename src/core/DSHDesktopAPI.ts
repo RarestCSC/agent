@@ -1,22 +1,7 @@
 import type { AgentEvent, ContextUsage, Session } from './types';
 
-export interface DshStartOptions {
-  sessionId?: string;
-  cwd?: string;
-  provider?: string;
-  model?: string;
-  profile?: string;
-  maxTokens?: number;
-  requestTimeoutMs?: number;
-}
-
-export interface DshRuntimeEvent {
-  sessionId: string;
-  type: 'assistant' | 'thinking' | 'tool' | 'runtime' | 'checkpoint' | 'error';
-  message: string;
-  raw?: unknown;
-}
-
+export interface DshRuntimeEvent { sessionId: string; type: 'assistant' | 'tool' | 'status' | 'completed' | 'runtime' | 'error'; message: string; raw?: unknown; }
+export interface DshStartOptions { sessionId?: string; cwd?: string; provider?: string; model?: string; profile?: string; maxTokens?: number; requestTimeoutMs?: number; }
 export interface DshDesktopAPI {
   version: string;
   platform: string;
@@ -28,15 +13,5 @@ export interface DshDesktopAPI {
   };
 }
 
-declare global {
-  interface Window {
-    dshDesktopAPI?: DshDesktopAPI;
-  }
-}
-
-export interface AgentRuntime {
-  startSession(title: string): Promise<Session>;
-  sendMessage(sessionId: string, prompt: string): AsyncIterable<AgentEvent>;
-  cancel(sessionId: string): Promise<void>;
-  getContextUsage(sessionId: string): Promise<ContextUsage>;
-}
+declare global { interface Window { dshDesktopAPI?: DshDesktopAPI; } }
+export interface AgentRuntime { startSession(title: string): Promise<Session>; sendMessage(sessionId: string, prompt: string): AsyncIterable<AgentEvent>; cancel(sessionId: string): Promise<void>; getContextUsage(sessionId: string): Promise<ContextUsage>; }
